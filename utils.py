@@ -1,8 +1,12 @@
+from time import sleep
+
+import numpy as np
 import pandas as pd
 import os
 import requests
+import logging as log
 
-BASE_URL = 'https://gdg.community.dev/api/'
+BASE_URL = 'https://gdg.community.dev/api'
 
 def get_header():
     return {
@@ -40,7 +44,7 @@ def body_transformer(df):
         #  "event_id": "string"
         # }
     body = {
-        "event_id": os.getenv("EVENT_ID"),
+        "event": os.getenv("EVENT_ID"),
         "attendees": [],
     }
     for index, row in df.iterrows():
@@ -48,16 +52,100 @@ def body_transformer(df):
             "email": row["Email Address"],
             "first_name": row["First Name"],
             "last_name": row["Last Name"],
-            "is_checked_in": row['Is Check In'],
-            "send_event_email": row["Is Email Sent"],
+            "is_checked_in": False,
+            "send_event_email": False,
         })
     return body
 
-def inject_attendees(body):
+def transform_body(row):
+    last_name = row["Last Name"]
+    if row['Last Name'] == "":
+        last_name = row['First Name']
+    return {
+        "event": os.getenv("EVENT_ID"),
+        "attendees": [
+            {
+                "email": row["Email Address"],
+                "first_name": row["First Name"],
+                "last_name": last_name,
+                "is_checked_in": False,
+                "send_event_email": False,
+            }
+        ],
+    }
+
+def inject_attendees(df):
+    df['Status'] = df['Status'].astype(str)
+
+    for index, row in df.iterrows():
+        print("Injecting attendee at {} from {} total datas".format(index + 1, len(df)))
+        if df['Status'] == 'Injected':
+            continue
+
+        body = transform_body(row)
+        res = inject_attendee(body)
+        if res.status_code == 201:
+            df.at[index, "Status"] = 'Injected'
+        else:
+            df.at[index, "Status"] = res.json()
+
+def inject_attendee(body):
     url = f"{BASE_URL}/attendee/?event={os.getenv('EVENT_ID')}&chapter={os.getenv('CHAPTER_ID')}"
-    print(url)
     # print(get_header())
     response = requests.post(url, headers=get_header(), json=body)
     print(response.status_code)
     print(response.json())
-    return None
+    return response
+
+def update_data(df, response):
+    df['Status'] = df['Status'].astype(str)
+    df['TicketId'] = df['TicketId'].astype(str)
+    for d in response:
+        email = d["email"]
+        # find row by email
+        df.loc[df['Email Address'] == email, 'Status'] = 'Injected'
+        df.loc[df['Email Address'] == email, 'TicketId'] = d['id']
+
+    return df
+
+def blast_emails(df):
+    for index, row in df.iterrows():
+        print("Processing Sending Email {} data from {} total data".format(index + 1, len(df)))
+        if row['Status'] == "Injected":
+            res = blast_email(row['TicketId'])
+            print(res)
+            df.at[index, 'Is Email Sent'] = True
+            sleep(1)
+
+def blast_qr():
+    attendees = get_attendees()
+    i = 1
+    for a in attendees:
+        print(f"Blasting for ticketId {a['id']} on {i} from {len(attendees)} datas.")
+        if i < 258:
+            print("Skipping blast email for ticketId {}".format(a['id']))
+            i = i + 1
+            continue
+
+        resp = blast_email(a['id'])
+        print(resp.status_code)
+        print(resp.json())
+        i = i + 1
+
+def get_attendees():
+    url = f'{BASE_URL}/attendee_search/?event={os.getenv("EVENT_ID")}&chapter={os.getenv("CHAPTER_ID")}&page_size=3000'
+
+    response = requests.get(url, headers=get_header())
+    print(response.status_code)
+    print(response.json())
+    return response.json()['results']
+
+def blast_email(ticket_id):
+    url = f"{BASE_URL}/attendee/{ticket_id}/send_event_email/?chapter={os.getenv('CHAPTER_ID')}"
+
+    body = {
+        "notification_email_countdown": 7
+    }
+
+    resp = requests.put(url, headers=get_header(), json=body)
+    return resp
